@@ -1,0 +1,49 @@
+{
+  "header-display": {
+    "type": "header",
+    "description": "Display"
+  },
+  "show-temp-in-panel": {
+    "type": "switch",
+    "default": true,
+    "description": "Show core temperature in panel",
+    "tooltip": "When off, only the fan-state icon appears in the panel."
+  },
+  "refresh-interval": {
+    "type": "spinbutton",
+    "default": 2,
+    "min": 1,
+    "max": 10,
+    "step": 1,
+    "units": "seconds",
+    "description": "Refresh interval"
+  },
+
+  "header-alerts": {
+    "type": "header",
+    "description": "Alerts"
+  },
+  "notify-on-critical": {
+    "type": "switch",
+    "default": true,
+    "description": "Show critical-notify popups on health errors",
+    "tooltip": "Pops a desktop alert when cooling cannot keep up, the BIOS is fighting FanNode, or the daemon stops."
+  },
+  "notify-on-recovery": {
+    "type": "switch",
+    "default": true,
+    "description": "Notify when temperatures return to normal",
+    "tooltip": "After a critical event, show a passive notification once temps recover."
+  },
+
+  "header-advanced": {
+    "type": "header",
+    "description": "Advanced"
+  },
+  "status-file": {
+    "type": "entry",
+    "default": "/run/fannode/status.json",
+    "description": "Status file path",
+    "tooltip": "Override only if you've changed the daemon's STATUS_FILE."
+  }
+}

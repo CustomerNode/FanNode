@@ -1,0 +1,9 @@
+/* FanNode applet stylesheet.
+ * The core look is inherited from the user's panel theme; we only nudge
+ * the temperature label to a fixed width so the panel doesn't jump as
+ * the number changes. */
+
+.applet-label {
+    min-width: 3.2em;
+    text-align: right;
+}

@@ -1,0 +1,246 @@
+#!/usr/bin/env python3
+"""
+FanNode AppIndicator — system-tray fallback for non-Cinnamon desktops.
+
+Reads /run/fannode/status.json (written by the fannode daemon) and shows a
+state-colored fan icon plus a menu with the live status. Critical health
+states fire a desktop notification.
+"""
+
+import json
+import os
+import subprocess
+import sys
+import time
+from datetime import datetime, timezone
+
+import gi
+
+gi.require_version("Gtk", "3.0")
+gi.require_version("Notify", "0.7")
+
+# Try the modern Ayatana indicator first, fall back to legacy AppIndicator3.
+try:
+    gi.require_version("AyatanaAppIndicator3", "0.1")
+    from gi.repository import AyatanaAppIndicator3 as AppIndicator3
+except (ValueError, ImportError):
+    gi.require_version("AppIndicator3", "0.1")
+    from gi.repository import AppIndicator3  # type: ignore
+
+from gi.repository import GLib, Gtk, Notify  # noqa: E402
+
+APP_ID = "fannode-indicator"
+STATUS_FILE = os.environ.get("FANNODE_STATUS", "/run/fannode/status.json")
+ICON_DIR = "/usr/share/fannode/icons"
+STALE_AFTER_SECONDS = 30
+REFRESH_SECONDS = 2
+
+
+def icon_for(state: str) -> str:
+    path = os.path.join(ICON_DIR, f"fannode-{state}.svg")
+    return path if os.path.isfile(path) else "dialog-information-symbolic"
+
+
+def is_fresh(status: dict) -> bool:
+    last = status.get("last_update")
+    if not last:
+        return False
+    try:
+        # Accept ISO-8601; treat naive as local
+        dt = datetime.fromisoformat(last.replace("Z", "+00:00"))
+        if dt.tzinfo is None:
+            dt = dt.astimezone()
+        return (datetime.now(timezone.utc) - dt.astimezone(timezone.utc)).total_seconds() < STALE_AFTER_SECONDS
+    except ValueError:
+        return False
+
+
+def read_status():
+    try:
+        with open(STATUS_FILE, "r", encoding="utf-8") as fh:
+            return json.load(fh)
+    except (FileNotFoundError, json.JSONDecodeError, PermissionError):
+        return None
+
+
+def spawn_terminal(cmd: str) -> None:
+    """Open the user's preferred terminal running cmd."""
+    term = os.environ.get("TERMINAL") or "x-terminal-emulator"
+    subprocess.Popen([term, "-e", "bash", "-c", cmd])
+
+
+class FanNodeIndicator:
+    def __init__(self):
+        Notify.init("FanNode")
+        self.indicator = AppIndicator3.Indicator.new(
+            APP_ID,
+            icon_for("inactive"),
+            AppIndicator3.IndicatorCategory.HARDWARE,
+        )
+        self.indicator.set_status(AppIndicator3.IndicatorStatus.ACTIVE)
+        self.indicator.set_title("FanNode")
+
+        self._last_health = None
+        self._build_menu()
+        self.refresh()
+
+    def _build_menu(self):
+        menu = Gtk.Menu()
+
+        self.header_item = Gtk.MenuItem(label="FanNode — initializing")
+        self.header_item.set_sensitive(False)
+        menu.append(self.header_item)
+
+        self.core_item = Gtk.MenuItem(label="")
+        self.core_item.set_sensitive(False)
+        menu.append(self.core_item)
+
+        self.fan_item = Gtk.MenuItem(label="")
+        self.fan_item.set_sensitive(False)
+        menu.append(self.fan_item)
+
+        self.health_item = Gtk.MenuItem(label="")
+        self.health_item.set_sensitive(False)
+        menu.append(self.health_item)
+
+        menu.append(Gtk.SeparatorMenuItem())
+
+        details = Gtk.MenuItem(label="Show details…")
+        details.connect("activate",
+                        lambda *_: spawn_terminal("fannode status; read -p 'Press Enter to close…'"))
+        menu.append(details)
+
+        logs = Gtk.MenuItem(label="View logs")
+        logs.connect("activate", lambda *_: spawn_terminal("fannode tail"))
+        menu.append(logs)
+
+        doctor = Gtk.MenuItem(label="Run doctor")
+        doctor.connect("activate",
+                       lambda *_: spawn_terminal("fannode doctor; read -p 'Press Enter to close…'"))
+        menu.append(doctor)
+
+        menu.append(Gtk.SeparatorMenuItem())
+
+        about = Gtk.MenuItem(label="Open project page")
+        about.connect("activate",
+                      lambda *_: subprocess.Popen(["xdg-open",
+                                                   "https://github.com/CustomerNode/FanNode"]))
+        menu.append(about)
+
+        quit_item = Gtk.MenuItem(label="Quit")
+        quit_item.connect("activate", lambda *_: Gtk.main_quit())
+        menu.append(quit_item)
+
+        menu.show_all()
+        self.indicator.set_menu(menu)
+
+    def refresh(self):
+        status = read_status()
+        if not status or not is_fresh(status):
+            self._render_inactive(stale=bool(status))
+        else:
+            self._render_active(status)
+        GLib.timeout_add_seconds(REFRESH_SECONDS, self._tick)
+        return False
+
+    def _tick(self):
+        self.refresh()
+        return False  # one-shot; refresh schedules the next
+
+    def _render_inactive(self, stale: bool):
+        self.indicator.set_icon_full(icon_for("inactive"), "FanNode inactive")
+        self.indicator.set_label("—", "FanNode")
+
+        if stale:
+            tip = "FanNode daemon stopped updating (status stale)."
+        else:
+            tip = "FanNode daemon is not running.\nStart: sudo systemctl start fannode"
+
+        self.header_item.set_label("FanNode — inactive")
+        self.core_item.set_label("")
+        self.fan_item.set_label("")
+        self.health_item.set_label(tip)
+
+        if self._last_health != "inactive":
+            self._notify_critical("FanNode stopped",
+                                  "Fan control has reverted to the BIOS.")
+        self._last_health = "inactive"
+
+    def _render_active(self, status: dict):
+        zone = status.get("zone", "normal")
+        max_t = status.get("max_core_temp", 0)
+        rpm = status.get("fan_rpm", 0)
+        pwm = status.get("pwm", 0)
+        pwm_pct = round((pwm * 100) / 255)
+        health = status.get("health", "ok")
+
+        icon_state = "critical" if zone == "critical" else zone
+        if health in ("thermal_overrun", "sensor_error"):
+            icon_state = "critical"
+
+        self.indicator.set_icon_full(icon_for(icon_state), f"FanNode — {health}")
+        self.indicator.set_label(f"{max_t}°C", "FanNode")
+
+        self.header_item.set_label(f"FanNode — {'active' if health == 'ok' else health}")
+        self.core_item.set_label(f"Hottest core: {max_t}°C")
+        self.fan_item.set_label(f"Fan: {rpm} RPM ({pwm_pct}% PWM, {zone})")
+        self.health_item.set_label(f"Health: {health}")
+
+        if health != self._last_health:
+            if health != "ok":
+                self._notify_health(health, status)
+            elif self._last_health and self._last_health not in ("ok", "inactive"):
+                self._notify_info("FanNode", "Temperatures back to normal.")
+        self._last_health = health
+
+    def _notify_health(self, health: str, status: dict):
+        titles = {
+            "thermal_overrun": "FanNode: cooling can't keep up",
+            "sustained_hot":   "FanNode: sustained high temperature",
+            "bios_reclaim":    "FanNode: BIOS keeps reclaiming fan control",
+            "sensor_error":    "FanNode: sensor read error",
+        }
+        bodies = {
+            "thermal_overrun":
+                f"Cores hit {status.get('max_core_temp')}°C with the fan at maximum. "
+                "Reduce load and check cooling.",
+            "sustained_hot":
+                "Cores have been hot for over 2 minutes. Investigate workload or cooling.",
+            "bios_reclaim":
+                "The BIOS is repeatedly overriding FanNode's fan setting. "
+                "Cooling may be intermittent.",
+            "sensor_error":
+                "FanNode could not read CPU temperatures. Is the coretemp module loaded?",
+        }
+        self._notify_critical(titles.get(health, f"FanNode: {health}"),
+                              bodies.get(health, f"Health state: {health}"))
+
+    def _notify_critical(self, summary: str, body: str):
+        try:
+            n = Notify.Notification.new(summary, body, "dialog-error")
+            n.set_urgency(Notify.Urgency.CRITICAL)
+            n.show()
+        except Exception:
+            subprocess.Popen(["notify-send", "-u", "critical",
+                              "-i", "dialog-error", summary, body])
+
+    def _notify_info(self, summary: str, body: str):
+        try:
+            n = Notify.Notification.new(summary, body, "dialog-information")
+            n.set_urgency(Notify.Urgency.LOW)
+            n.show()
+        except Exception:
+            subprocess.Popen(["notify-send", "-u", "low", summary, body])
+
+
+def main() -> int:
+    indicator = FanNodeIndicator()  # noqa: F841 — keeps reference alive
+    try:
+        Gtk.main()
+    except KeyboardInterrupt:
+        pass
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

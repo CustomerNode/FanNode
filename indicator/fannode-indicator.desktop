@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=FanNode
+Comment=System-tray status for the FanNode fan-control daemon
+Exec=/usr/local/bin/fannode-indicator
+Icon=fan
+Terminal=false
+Categories=System;Monitor;
+StartupNotify=false
+X-GNOME-Autostart-enabled=true
+NoDisplay=false
