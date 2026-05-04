@@ -1,0 +1,69 @@
+name: Hardware compatibility report
+description: Tell us whether FanNode worked on a Dell desktop other than the Studio XPS 9100.
+title: "[hw] <Dell model name> — works|partial|broken"
+labels: [hardware-report]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Hardware reports are the most valuable contribution to FanNode. Even a
+        one-line "works on Optiplex 990, BIOS A20" is enough to unblock the next person.
+
+  - type: input
+    id: model
+    attributes:
+      label: Dell model
+      description: From `cat /sys/devices/virtual/dmi/id/product_name`
+      placeholder: e.g. "Dell Studio XPS 8100"
+    validations:
+      required: true
+
+  - type: input
+    id: bios
+    attributes:
+      label: BIOS version + date
+      description: From `dmidecode -t bios | grep -E "Version|Release Date"` (run as root)
+      placeholder: e.g. "A12 04/15/2014"
+    validations:
+      required: true
+
+  - type: input
+    id: cpu
+    attributes:
+      label: CPU
+      placeholder: "Intel Core i7 X 980"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: outcome
+    attributes:
+      label: Outcome
+      options:
+        - Works (fan ramps as expected)
+        - Partial (fan ramps but BIOS reclaims often)
+        - Broken (pwm1 not writable, daemon won't start)
+        - Other (explain below)
+    validations:
+      required: true
+
+  - type: textarea
+    id: sensors
+    attributes:
+      label: "`sensors -u` output"
+      description: Helps confirm the dell_smm/coretemp layout matches.
+      render: text
+    validations:
+      required: true
+
+  - type: textarea
+    id: doctor
+    attributes:
+      label: "`fannode doctor` output"
+      render: text
+
+  - type: textarea
+    id: notes
+    attributes:
+      label: Notes
+      description: Anything you'd want the next person on the same hardware to know.

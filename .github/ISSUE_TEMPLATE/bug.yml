@@ -1,0 +1,43 @@
+name: Bug report
+description: Something is broken or behaves unexpectedly.
+title: "[bug] <one-line summary>"
+labels: [bug]
+body:
+  - type: input
+    id: version
+    attributes:
+      label: FanNode version
+      description: Output of `fannode --version`
+    validations:
+      required: true
+
+  - type: input
+    id: distro
+    attributes:
+      label: Distro + DE
+      placeholder: "Linux Mint 22.3 Cinnamon"
+    validations:
+      required: true
+
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: What did you do, and what did you expect?
+    validations:
+      required: true
+
+  - type: textarea
+    id: doctor
+    attributes:
+      label: "`fannode doctor` output"
+      render: text
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Recent journal logs
+      description: "`journalctl -u fannode -n 100 --no-pager`"
+      render: text

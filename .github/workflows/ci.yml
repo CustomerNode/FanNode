@@ -1,0 +1,65 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  shellcheck:
+    name: ShellCheck
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run shellcheck
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y shellcheck
+          shellcheck --severity=warning bin/fannode install.sh uninstall.sh
+
+  shfmt:
+    name: shfmt (formatting)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install shfmt
+        run: |
+          curl -fsSL -o /tmp/shfmt \
+            "https://github.com/mvdan/sh/releases/latest/download/shfmt_v3.8.0_linux_amd64"
+          chmod +x /tmp/shfmt
+      - name: Check formatting
+        run: |
+          /tmp/shfmt -d -i 4 -ci bin/fannode install.sh uninstall.sh
+
+  python-lint:
+    name: Python lint (indicator)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install ruff
+        run: pip install ruff
+      - name: Run ruff
+        run: ruff check indicator/
+
+  json-validate:
+    name: Applet metadata + settings
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate JSON
+        run: |
+          for f in applet/fannode@customernode/metadata.json \
+                   applet/fannode@customernode/settings-schema.json; do
+            python3 -m json.tool "$f" > /dev/null
+            echo "OK: $f"
+          done
+
+  smoke:
+    name: Smoke test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: bash tests/smoke.sh
