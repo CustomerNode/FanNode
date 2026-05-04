@@ -30,6 +30,7 @@ SUSTAINED_HOT_SECS=120
 # Runtime state
 CURRENT_ZONE="normal"
 LAST_PWM=-1
+LAST_PWM_READBACK=-1
 BIOS_RECLAIM_COUNT=0
 HOT_SINCE=0
 DAEMON_START=$(date +%s)
@@ -120,19 +121,26 @@ pwm_for_zone() {
 }
 
 apply_pwm() {
-    local pwm=$1 readback
+    local pwm=$1 readback=-1 drop
     [[ -w "$PWM_FILE" ]] || { log "PWM not writable: $PWM_FILE"; return 1; }
 
-    # Detect BIOS reclaim: if our last assert was substantial but the readback
-    # has already collapsed, the BIOS stole it back between cycles.
-    if (( LAST_PWM > 32 )) && [[ -r "$PWM_FILE" ]]; then
+    # Detect BIOS reclaim. Read the current value before writing — that's what
+    # the BIOS may have done to last cycle's assert. We only flag *downward*
+    # divergence (which means insufficient cooling); upward clamps are safer.
+    # Threshold: drop > 24 PWM AND > 15% of what we wrote. This catches the
+    # 180->128 case observed in stress testing while ignoring small jitter.
+    if (( LAST_PWM > 64 )) && [[ -r "$PWM_FILE" ]]; then
         readback=$(<"$PWM_FILE")
-        if (( readback < LAST_PWM / 2 )); then
+        drop=$(( LAST_PWM - readback ))
+        if (( drop > 24 )) && (( readback * 100 < LAST_PWM * 85 )); then
             BIOS_RECLAIM_COUNT=$(( BIOS_RECLAIM_COUNT + 1 ))
         fi
+    elif [[ -r "$PWM_FILE" ]]; then
+        readback=$(<"$PWM_FILE")
     fi
     echo "$pwm" > "$PWM_FILE"
     LAST_PWM=$pwm
+    LAST_PWM_READBACK=$readback
 }
 
 determine_health() {
@@ -174,6 +182,7 @@ write_status() {
   "max_core_temp": $max_t,
   "zone": "$zone",
   "pwm": $pwm,
+  "pwm_readback": $LAST_PWM_READBACK,
   "fan_rpm": $rpm,
   "bios_reclaim_count": $BIOS_RECLAIM_COUNT,
   "uptime_seconds": $uptime,
@@ -231,19 +240,23 @@ cmd_status() {
         cat "$STATUS_FILE"
         return
     fi
-    local zone pwm rpm max_t health uptime reclaim pwm_pct
-    zone=$(grep -oP   '"zone":\s*"\K[^"]+'           "$STATUS_FILE")
-    pwm=$(grep -oP    '"pwm":\s*\K[0-9]+'            "$STATUS_FILE")
-    rpm=$(grep -oP    '"fan_rpm":\s*\K[0-9]+'        "$STATUS_FILE")
-    max_t=$(grep -oP  '"max_core_temp":\s*\K[0-9]+'  "$STATUS_FILE")
-    health=$(grep -oP '"health":\s*"\K[^"]+'         "$STATUS_FILE")
-    uptime=$(grep -oP '"uptime_seconds":\s*\K[0-9]+' "$STATUS_FILE")
+    local zone pwm pwm_rb rpm max_t health uptime reclaim pwm_pct clamp_note=""
+    zone=$(grep -oP    '"zone":\s*"\K[^"]+'             "$STATUS_FILE")
+    pwm=$(grep -oP     '"pwm":\s*\K[0-9]+'              "$STATUS_FILE")
+    pwm_rb=$(grep -oP  '"pwm_readback":\s*\K-?[0-9]+'   "$STATUS_FILE")
+    rpm=$(grep -oP     '"fan_rpm":\s*\K[0-9]+'          "$STATUS_FILE")
+    max_t=$(grep -oP   '"max_core_temp":\s*\K[0-9]+'    "$STATUS_FILE")
+    health=$(grep -oP  '"health":\s*"\K[^"]+'           "$STATUS_FILE")
+    uptime=$(grep -oP  '"uptime_seconds":\s*\K[0-9]+'   "$STATUS_FILE")
     reclaim=$(grep -oP '"bios_reclaim_count":\s*\K[0-9]+' "$STATUS_FILE")
     pwm_pct=$(( pwm * 100 / 255 ))
+    if [[ -n "$pwm_rb" && "$pwm_rb" -ge 0 && "$pwm_rb" != "$pwm" ]]; then
+        clamp_note=" (BIOS clamped to ${pwm_rb})"
+    fi
     cat <<EOF
 FanNode — active
 Hottest core: ${max_t}°C
-Fan: ${rpm} RPM (${pwm_pct}% PWM)  Curve zone: ${zone}
+Fan: ${rpm} RPM (${pwm_pct}% PWM${clamp_note})  Curve zone: ${zone}
 BIOS reclaim events: ${reclaim}   Health: ${health}
 Daemon: running for ${uptime}s
 EOF

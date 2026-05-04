@@ -9,7 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 - Initial public release.
-- `fannode` daemon with zone-based fan curve, hysteresis, and BIOS-reclaim detection.
+- `fannode` daemon with zone-based fan curve, hysteresis, and BIOS-reclaim detection (drop > 24 PWM AND > 15% counts as a reclaim event).
+- `pwm_readback` in status JSON reports what the BIOS actually has the PWM file set to, separate from what the daemon wrote. `fannode status` flags inline when they diverge.
 - Hardened systemd unit (`NoNewPrivileges`, `ProtectSystem=strict`, write paths whitelisted).
 - Idempotent `install.sh` and `fannode uninstall`.
 - Cinnamon panel applet (`fannode@customernode`) with live in-panel temperature, color-coded fan icon, and critical-notify popups on health errors.
