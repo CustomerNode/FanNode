@@ -253,7 +253,11 @@ cmd_tail() { exec journalctl -fu fannode "$@"; }
 
 cmd_doctor() {
     local ok=true product
-    say()  { printf '  [%s] %s\n' "$1" "$2"; [[ "$1" == FAIL ]] && ok=false; }
+    say() {
+        printf '  [%s] %s\n' "$1" "$2"
+        if [[ "$1" == FAIL ]]; then ok=false; fi
+        return 0
+    }
 
     echo "FanNode doctor (v$VERSION):"
 
@@ -264,10 +268,16 @@ cmd_doctor() {
         say WARN "Hardware: $product (untested — open a hardware report)"
     fi
 
-    lsmod | grep -q '^dell_smm_hwmon' && say OK "dell_smm_hwmon loaded" \
-                                       || say FAIL "dell_smm_hwmon not loaded"
-    lsmod | grep -q '^coretemp'        && say OK "coretemp loaded" \
-                                       || say FAIL "coretemp not loaded"
+    if grep -q '^dell_smm_hwmon ' /proc/modules; then
+        say OK   "dell_smm_hwmon loaded"
+    else
+        say FAIL "dell_smm_hwmon not loaded"
+    fi
+    if grep -q '^coretemp ' /proc/modules; then
+        say OK   "coretemp loaded"
+    else
+        say FAIL "coretemp not loaded"
+    fi
 
     discover_hwmon
     [[ -e "$PWM_FILE" ]] && say OK   "PWM file: $PWM_FILE" \

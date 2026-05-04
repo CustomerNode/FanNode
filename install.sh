@@ -66,7 +66,7 @@ check_hardware() {
 check_modules() {
     bold "Checking kernel modules…"
     for mod in dell_smm_hwmon coretemp; do
-        if lsmod | grep -q "^${mod}"; then
+        if grep -q "^${mod} " /proc/modules; then
             ok "$mod loaded"
         else
             warn "$mod not loaded — attempting modprobe…"
