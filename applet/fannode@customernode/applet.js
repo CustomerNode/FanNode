@@ -101,7 +101,10 @@ class FanNodeApplet extends Applet.TextIconApplet {
         try {
             const [ok, contents] = GLib.file_get_contents(this.statusFile || "/run/fannode/status.json");
             if (!ok) return null;
-            return JSON.parse(contents.toString());
+            // contents is a Uint8Array; decode as UTF-8 (avoids the deprecated
+            // implicit .toString() conversion that GJS warns about).
+            const text = new TextDecoder("utf-8").decode(contents);
+            return JSON.parse(text);
         } catch (e) {
             return null;
         }
