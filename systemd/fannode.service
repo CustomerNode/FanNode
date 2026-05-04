@@ -1,0 +1,53 @@
+[Unit]
+Description=FanNode — userland fan-curve daemon for Dell desktops
+Documentation=https://github.com/CustomerNode/FanNode
+After=multi-user.target
+ConditionKernelCommandLine=!fannode.disable
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/fannode start
+Restart=on-failure
+RestartSec=5
+
+# Sandboxing — the daemon only needs to read /sys hwmon and write pwm1
+# plus its own /run state directory. Everything else is locked down.
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+ProtectControlGroups=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectClock=yes
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged @resources
+
+# We need /sys writable for hwmon PWM. Leave ProtectKernelTunables off
+# but explicitly whitelist only the directories we touch.
+ProtectKernelTunables=no
+ReadWritePaths=/sys/class/hwmon /run
+
+# This service runs as root because /sys/class/hwmon/.../pwm1 is root-only by
+# default. We drop all capabilities except what the kernel implicitly requires
+# for write(2) on /sys.
+CapabilityBoundingSet=
+AmbientCapabilities=
+
+# Resource bounds — tiny by design.
+MemoryHigh=64M
+MemoryMax=128M
+TasksMax=16
+
+# Runtime status directory; auto-created with correct ownership.
+RuntimeDirectory=fannode
+RuntimeDirectoryMode=0755
+
+[Install]
+WantedBy=multi-user.target

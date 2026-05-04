@@ -1,0 +1,325 @@
+#!/usr/bin/env bash
+# fannode — userland fan-curve daemon for Dell desktops
+# https://github.com/CustomerNode/FanNode
+
+set -euo pipefail
+
+VERSION="0.1.0"
+CONFIG_FILE="${FANNODE_CONFIG:-/etc/fannode.conf}"
+STATE_DIR="/run/fannode"
+STATUS_FILE="${STATE_DIR}/status.json"
+LOG_TAG="fannode"
+
+# Defaults — overridden by /etc/fannode.conf
+INTERVAL=3
+PWM_FILE=""
+TACH_FILE=""
+CORETEMP_HWMON=""
+DELL_SMM_HWMON=""
+CURVE_NORMAL_MAX_TEMP=70
+CURVE_NORMAL_PWM=80
+CURVE_WARM_MAX_TEMP=85
+CURVE_WARM_PWM=180
+CURVE_HOT_MAX_TEMP=95
+CURVE_HOT_PWM=240
+CURVE_CRITICAL_PWM=255
+HYSTERESIS_DROP=3
+CRITICAL_TEMP=95
+SUSTAINED_HOT_SECS=120
+
+# Runtime state
+CURRENT_ZONE="normal"
+LAST_PWM=-1
+BIOS_RECLAIM_COUNT=0
+HOT_SINCE=0
+DAEMON_START=$(date +%s)
+
+log()  { logger -t "$LOG_TAG" -- "$*"; printf '[%s] %s\n' "$(date -Iseconds)" "$*" >&2; }
+die()  { log "FATAL: $*"; exit 1; }
+
+load_config() {
+    if [[ -f "$CONFIG_FILE" ]]; then
+        # shellcheck source=/dev/null
+        source "$CONFIG_FILE"
+    fi
+}
+
+discover_hwmon() {
+    local h name
+    for h in /sys/class/hwmon/hwmon*; do
+        [[ -d "$h" ]] || continue
+        name=$(cat "$h/name" 2>/dev/null) || continue
+        case "$name" in
+            coretemp) CORETEMP_HWMON="$h" ;;
+            dell_smm) DELL_SMM_HWMON="$h" ;;
+        esac
+    done
+    [[ -z "$PWM_FILE"  && -n "$DELL_SMM_HWMON" ]] && PWM_FILE="${DELL_SMM_HWMON}/pwm1"
+    [[ -z "$TACH_FILE" && -n "$DELL_SMM_HWMON" ]] && TACH_FILE="${DELL_SMM_HWMON}/fan1_input"
+}
+
+read_max_core_temp() {
+    local max=0 t f
+    for f in "$CORETEMP_HWMON"/temp*_input; do
+        [[ -f "$f" ]] || continue
+        t=$(<"$f")
+        t=$(( t / 1000 ))
+        (( t > max )) && max=$t
+    done
+    echo "$max"
+}
+
+# Emits inner JSON fields: "core0":47,"core1":50
+read_core_temps_json() {
+    local first=1 f label_file label t
+    for f in "$CORETEMP_HWMON"/temp*_input; do
+        [[ -f "$f" ]] || continue
+        label_file="${f%_input}_label"
+        label="core?"
+        if [[ -f "$label_file" ]]; then
+            label=$(<"$label_file")
+            label="${label// /}"
+            label="${label,,}"
+        fi
+        t=$(<"$f")
+        t=$(( t / 1000 ))
+        (( first )) && first=0 || printf ','
+        printf '"%s":%d' "$label" "$t"
+    done
+}
+
+zone_for() {
+    local t=$1 cur=$CURRENT_ZONE
+    case "$cur" in
+        normal)
+            (( t > CURVE_NORMAL_MAX_TEMP )) && { echo warm; return; }
+            ;;
+        warm)
+            (( t > CURVE_WARM_MAX_TEMP )) && { echo hot; return; }
+            (( t < CURVE_NORMAL_MAX_TEMP - HYSTERESIS_DROP )) && { echo normal; return; }
+            ;;
+        hot)
+            (( t >= CRITICAL_TEMP )) && { echo critical; return; }
+            (( t < CURVE_WARM_MAX_TEMP - HYSTERESIS_DROP )) && { echo warm; return; }
+            ;;
+        critical)
+            (( t < CURVE_HOT_MAX_TEMP - HYSTERESIS_DROP )) && { echo hot; return; }
+            ;;
+    esac
+    echo "$cur"
+}
+
+pwm_for_zone() {
+    case "$1" in
+        normal)   echo "$CURVE_NORMAL_PWM" ;;
+        warm)     echo "$CURVE_WARM_PWM" ;;
+        hot)      echo "$CURVE_HOT_PWM" ;;
+        critical) echo "$CURVE_CRITICAL_PWM" ;;
+        *)        echo "$CURVE_NORMAL_PWM" ;;
+    esac
+}
+
+apply_pwm() {
+    local pwm=$1 readback
+    [[ -w "$PWM_FILE" ]] || { log "PWM not writable: $PWM_FILE"; return 1; }
+
+    # Detect BIOS reclaim: if our last assert was substantial but the readback
+    # has already collapsed, the BIOS stole it back between cycles.
+    if (( LAST_PWM > 32 )) && [[ -r "$PWM_FILE" ]]; then
+        readback=$(<"$PWM_FILE")
+        if (( readback < LAST_PWM / 2 )); then
+            BIOS_RECLAIM_COUNT=$(( BIOS_RECLAIM_COUNT + 1 ))
+        fi
+    fi
+    echo "$pwm" > "$PWM_FILE"
+    LAST_PWM=$pwm
+}
+
+determine_health() {
+    local max_t=$1 pwm=$2 now
+    now=$(date +%s)
+    if (( max_t >= CRITICAL_TEMP && pwm >= 250 )); then
+        echo thermal_overrun
+        return
+    fi
+    if (( max_t >= CURVE_HOT_MAX_TEMP )); then
+        (( HOT_SINCE == 0 )) && HOT_SINCE=$now
+        if (( now - HOT_SINCE >= SUSTAINED_HOT_SECS )); then
+            echo sustained_hot
+            return
+        fi
+    else
+        HOT_SINCE=0
+    fi
+    if (( BIOS_RECLAIM_COUNT >= 5 )); then
+        echo bios_reclaim
+        return
+    fi
+    echo ok
+}
+
+write_status() {
+    local max_t=$1 zone=$2 pwm=$3 health=$4
+    local rpm=0 now uptime cores tmp
+    [[ -r "$TACH_FILE" ]] && rpm=$(<"$TACH_FILE")
+    now=$(date -Iseconds)
+    uptime=$(( $(date +%s) - DAEMON_START ))
+    cores=$(read_core_temps_json)
+    tmp="${STATUS_FILE}.tmp"
+    cat > "$tmp" <<EOF
+{
+  "active": true,
+  "health": "$health",
+  "core_temps": {$cores},
+  "max_core_temp": $max_t,
+  "zone": "$zone",
+  "pwm": $pwm,
+  "fan_rpm": $rpm,
+  "bios_reclaim_count": $BIOS_RECLAIM_COUNT,
+  "uptime_seconds": $uptime,
+  "last_update": "$now",
+  "version": "$VERSION"
+}
+EOF
+    mv -f "$tmp" "$STATUS_FILE"
+}
+
+cleanup() {
+    log "Stopping. Fan control will return to BIOS within a few minutes."
+    rm -f "$STATUS_FILE"
+    exit 0
+}
+
+cmd_start() {
+    load_config
+    discover_hwmon
+    [[ -d "$CORETEMP_HWMON" ]] || die "coretemp hwmon not found (is the coretemp module loaded?)"
+    [[ -e "$PWM_FILE" ]]       || die "pwm1 not found at $PWM_FILE (is dell_smm_hwmon loaded?)"
+    [[ -w "$PWM_FILE" ]]       || die "pwm1 not writable at $PWM_FILE (run as root)"
+    mkdir -p "$STATE_DIR"
+    chmod 0755 "$STATE_DIR"
+    trap cleanup TERM INT HUP
+
+    log "FanNode $VERSION starting (interval=${INTERVAL}s, pwm=$PWM_FILE)"
+
+    local t zone pwm health
+    while true; do
+        if ! t=$(read_max_core_temp) || (( t == 0 )); then
+            health=sensor_error
+            zone=$CURRENT_ZONE
+            pwm=$LAST_PWM
+            (( pwm < 0 )) && pwm=$CURVE_HOT_PWM   # fail safe to high cooling
+        else
+            zone=$(zone_for "$t")
+            CURRENT_ZONE=$zone
+            pwm=$(pwm_for_zone "$zone")
+            apply_pwm "$pwm" || health=sensor_error
+            health=$(determine_health "$t" "$pwm")
+        fi
+        write_status "$t" "$zone" "$pwm" "$health"
+        sleep "$INTERVAL"
+    done
+}
+
+cmd_status() {
+    if [[ ! -f "$STATUS_FILE" ]]; then
+        echo "FanNode is not running." >&2
+        echo "Start with: sudo systemctl start fannode" >&2
+        exit 1
+    fi
+    if [[ "${1:-}" == "--json" ]]; then
+        cat "$STATUS_FILE"
+        return
+    fi
+    local zone pwm rpm max_t health uptime reclaim pwm_pct
+    zone=$(grep -oP   '"zone":\s*"\K[^"]+'           "$STATUS_FILE")
+    pwm=$(grep -oP    '"pwm":\s*\K[0-9]+'            "$STATUS_FILE")
+    rpm=$(grep -oP    '"fan_rpm":\s*\K[0-9]+'        "$STATUS_FILE")
+    max_t=$(grep -oP  '"max_core_temp":\s*\K[0-9]+'  "$STATUS_FILE")
+    health=$(grep -oP '"health":\s*"\K[^"]+'         "$STATUS_FILE")
+    uptime=$(grep -oP '"uptime_seconds":\s*\K[0-9]+' "$STATUS_FILE")
+    reclaim=$(grep -oP '"bios_reclaim_count":\s*\K[0-9]+' "$STATUS_FILE")
+    pwm_pct=$(( pwm * 100 / 255 ))
+    cat <<EOF
+FanNode — active
+Hottest core: ${max_t}°C
+Fan: ${rpm} RPM (${pwm_pct}% PWM)  Curve zone: ${zone}
+BIOS reclaim events: ${reclaim}   Health: ${health}
+Daemon: running for ${uptime}s
+EOF
+}
+
+cmd_tail() { exec journalctl -fu fannode "$@"; }
+
+cmd_doctor() {
+    local ok=true product
+    say()  { printf '  [%s] %s\n' "$1" "$2"; [[ "$1" == FAIL ]] && ok=false; }
+
+    echo "FanNode doctor (v$VERSION):"
+
+    product=$(cat /sys/devices/virtual/dmi/id/product_name 2>/dev/null || echo unknown)
+    if [[ "$product" == *"Studio XPS 9100"* ]]; then
+        say OK   "Hardware: $product (tested)"
+    else
+        say WARN "Hardware: $product (untested — open a hardware report)"
+    fi
+
+    lsmod | grep -q '^dell_smm_hwmon' && say OK "dell_smm_hwmon loaded" \
+                                       || say FAIL "dell_smm_hwmon not loaded"
+    lsmod | grep -q '^coretemp'        && say OK "coretemp loaded" \
+                                       || say FAIL "coretemp not loaded"
+
+    discover_hwmon
+    [[ -e "$PWM_FILE" ]] && say OK   "PWM file: $PWM_FILE" \
+                         || say FAIL "PWM file not found"
+    [[ -d "$CORETEMP_HWMON" ]] && say OK   "coretemp hwmon: $CORETEMP_HWMON" \
+                               || say FAIL "coretemp hwmon not found"
+
+    if systemctl is-active --quiet fannode 2>/dev/null; then
+        say OK   "fannode.service is active"
+    else
+        say WARN "fannode.service is not active (sudo systemctl start fannode)"
+    fi
+
+    $ok || exit 1
+}
+
+cmd_install()   { exec /usr/local/share/fannode/install.sh   "$@"; }
+cmd_uninstall() { exec /usr/local/share/fannode/uninstall.sh "$@"; }
+
+usage() {
+    cat <<EOF
+FanNode $VERSION — userland fan-curve daemon for Dell desktops
+
+Usage: fannode <command>
+
+Commands:
+  start            Run the daemon (foreground; used by systemd)
+  status [--json]  Show current state
+  tail             Follow journal output
+  doctor           Check hardware, modules, permissions
+  install          (Re-)install FanNode
+  uninstall        Remove FanNode and hand fan control back to BIOS
+
+Docs: https://github.com/CustomerNode/FanNode
+EOF
+}
+
+main() {
+    local cmd=${1:-}
+    [[ -z "$cmd" ]] && { usage; exit 1; }
+    shift || true
+    case "$cmd" in
+        start)              cmd_start     "$@" ;;
+        status)             cmd_status    "$@" ;;
+        tail)               cmd_tail      "$@" ;;
+        doctor)             cmd_doctor    "$@" ;;
+        install)            cmd_install   "$@" ;;
+        uninstall)          cmd_uninstall "$@" ;;
+        -h|--help|help)     usage ;;
+        -V|--version)       echo "fannode $VERSION" ;;
+        *)                  usage; exit 1 ;;
+    esac
+}
+
+main "$@"
