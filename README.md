@@ -102,13 +102,15 @@ For the full story including the BIOS reverse-engineering rabbit hole, see [docs
 # so values above ~10 risk losing the tug-of-war.
 INTERVAL=3
 
-# Fan curve: max-core-temp (°C) -> PWM (0-255)
-CURVE_NORMAL_MAX_TEMP=70
+# Fan curve: max-core-temp (°C) -> PWM (0-255).
+# Step-function shape sidesteps a BIOS quirk where mid-range PWM values
+# (129–250) get silently clamped down to ~128 — see docs/how-it-works.md.
+CURVE_NORMAL_MAX_TEMP=65
 CURVE_NORMAL_PWM=80
-CURVE_WARM_MAX_TEMP=85
-CURVE_WARM_PWM=180
-CURVE_HOT_MAX_TEMP=95
-CURVE_HOT_PWM=240
+CURVE_WARM_MAX_TEMP=80
+CURVE_WARM_PWM=255
+CURVE_HOT_MAX_TEMP=90
+CURVE_HOT_PWM=255
 CURVE_CRITICAL_PWM=255
 
 # Hysteresis: temp must drop this many °C below a zone boundary
