@@ -1,9 +1,17 @@
 /* FanNode applet stylesheet.
  * The core look is inherited from the user's panel theme; we only nudge
- * the temperature label to a fixed width so the panel doesn't jump as
- * the number changes. */
+ * the temperature label so it doesn't twitch as digits change.
+ *
+ *  - tabular-nums keeps digit cells the same width (so 47°C and 100°C
+ *    don't shift the icon when the value updates).
+ *  - min-width reserves space for up to 4 chars + the °C suffix, so the
+ *    panel layout stays stable across the full curve range.
+ *  - small left padding gives the icon a tiny breathing room. */
 
 .applet-label {
-    min-width: 3.2em;
+    min-width: 4em;
+    padding-left: 0.25em;
     text-align: right;
+    font-variant-numeric: tabular-nums;
+    font-feature-settings: "tnum" 1;
 }

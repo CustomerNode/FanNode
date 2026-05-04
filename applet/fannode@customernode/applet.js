@@ -240,9 +240,31 @@ class FanNodeApplet extends Applet.TextIconApplet {
     }
 
     _spawnTerm(cmd) {
-        const term = GLib.getenv("TERMINAL")
-                  || "x-terminal-emulator";
-        Util.spawnCommandLine(`${term} -e bash -c "${cmd.replace(/"/g, '\\"')}"`);
+        // Different terminals disagree on how to pass a command.
+        // Modern GTK terminals (gnome-terminal, mate-terminal, xfce4-terminal,
+        // tilix) want `-- bash -c CMD`. Classic terminals (xterm, konsole,
+        // urxvt) want `-e bash -c CMD`. Try preferred, in order, and use the
+        // array form of spawn so we don't have to escape shell quotes.
+        const candidates = [
+            ["gnome-terminal",  "--"],
+            ["mate-terminal",   "--"],
+            ["xfce4-terminal",  "--"],
+            ["tilix",           "--"],
+            ["konsole",         "-e"],
+            ["urxvt",           "-e"],
+            ["xterm",           "-e"],
+        ];
+        const envTerm = GLib.getenv("TERMINAL");
+        if (envTerm) candidates.unshift([envTerm, "--"]);
+
+        for (const [bin, sep] of candidates) {
+            if (GLib.find_program_in_path(bin)) {
+                Util.spawn([bin, sep, "bash", "-c", cmd]);
+                return;
+            }
+        }
+        // Last-resort fallback
+        Util.spawn(["x-terminal-emulator", "-e", "bash", "-c", cmd]);
     }
 }
 

@@ -63,10 +63,41 @@ def read_status():
         return None
 
 
+def _which(binary: str) -> str | None:
+    for path in os.environ.get("PATH", "").split(os.pathsep):
+        candidate = os.path.join(path, binary)
+        if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
+            return candidate
+    return None
+
+
 def spawn_terminal(cmd: str) -> None:
-    """Open the user's preferred terminal running cmd."""
-    term = os.environ.get("TERMINAL") or "x-terminal-emulator"
-    subprocess.Popen([term, "-e", "bash", "-c", cmd])
+    """Open the user's preferred terminal running cmd.
+
+    Modern GTK terminals (gnome-terminal, mate-terminal, xfce4-terminal,
+    tilix) take `-- bash -c CMD`; classic terminals (xterm, konsole, urxvt)
+    take `-e bash -c CMD`. We try them in order and pick the first installed.
+    """
+    candidates: list[tuple[str, str]] = [
+        ("gnome-terminal", "--"),
+        ("mate-terminal",  "--"),
+        ("xfce4-terminal", "--"),
+        ("tilix",          "--"),
+        ("konsole",        "-e"),
+        ("urxvt",          "-e"),
+        ("xterm",          "-e"),
+    ]
+    env_term = os.environ.get("TERMINAL")
+    if env_term:
+        candidates.insert(0, (env_term, "--"))
+
+    for binary, sep in candidates:
+        if _which(binary):
+            subprocess.Popen([binary, sep, "bash", "-c", cmd])
+            return
+
+    # Last-resort fallback
+    subprocess.Popen(["x-terminal-emulator", "-e", "bash", "-c", cmd])
 
 
 class FanNodeIndicator:
