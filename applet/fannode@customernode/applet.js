@@ -18,6 +18,12 @@ const GLib       = imports.gi.GLib;
 
 const UUID = "fannode@customernode";
 const STALE_AFTER_SECONDS = 30;
+const NOTIFY_COOLDOWN_MS = 10 * 60 * 1000;  // 10 minutes per health state
+
+// Only these states warrant a desktop popup. Others (bios_reclaim,
+// sustained_hot) are conveyed by the icon color and tooltip, so we don't
+// pile up notifications when the user is away.
+const ESCALATE = new Set(["thermal_overrun", "sensor_error"]);
 
 class FanNodeApplet extends Applet.TextIconApplet {
     constructor(metadata, orientation, panelHeight, instanceId) {
@@ -25,13 +31,13 @@ class FanNodeApplet extends Applet.TextIconApplet {
 
         this._metadata = metadata;
         this._lastHealth = null;
+        this._notifiedAt = {};   // health -> ms timestamp of last fired popup
         this._timeoutId = 0;
 
         this.settings = new Settings.AppletSettings(this, UUID, instanceId);
         this.settings.bind("show-temp-in-panel",  "showTempInPanel",  () => this._refresh());
         this.settings.bind("refresh-interval",    "refreshInterval",  () => {});
         this.settings.bind("notify-on-critical",  "notifyOnCritical", () => {});
-        this.settings.bind("notify-on-recovery",  "notifyOnRecovery", () => {});
         this.settings.bind("status-file",         "statusFile",       () => {});
 
         this._setIcon("inactive");
@@ -149,13 +155,24 @@ class FanNodeApplet extends Applet.TextIconApplet {
         this._fanItem.label.set_text("");
         this._healthItem.label.set_text(tip);
 
-        if (this._lastHealth !== "inactive" && this.notifyOnCritical) {
+        if (this._lastHealth !== "inactive" && this.notifyOnCritical
+            && this._cooldownOk("inactive")) {
+            this._markNotified("inactive");
             this._criticalNotify(
                 "FanNode stopped",
                 "The FanNode daemon is not running. Fan control has reverted to the BIOS."
             );
         }
         this._lastHealth = "inactive";
+    }
+
+    _cooldownOk(key) {
+        const last = this._notifiedAt[key] || 0;
+        return (Date.now() - last) >= NOTIFY_COOLDOWN_MS;
+    }
+
+    _markNotified(key) {
+        this._notifiedAt[key] = Date.now();
     }
 
     _renderActive(status) {
@@ -186,17 +203,15 @@ class FanNodeApplet extends Applet.TextIconApplet {
         this._fanItem.label.set_text(`Fan: ${rpm} RPM (${pwmPct}% PWM, ${zone})`);
         this._healthItem.label.set_text(`Health: ${health}`);
 
-        // Health transitions
-        if (health !== this._lastHealth) {
-            if (health !== "ok" && this.notifyOnCritical) {
-                this._notifyHealth(health, status);
-            } else if (health === "ok"
-                       && this._lastHealth
-                       && this._lastHealth !== "ok"
-                       && this._lastHealth !== "inactive"
-                       && this.notifyOnRecovery) {
-                this._infoNotify("FanNode", "Temperatures back to normal.");
-            }
+        // Only escalate states that need attention. Others are conveyed by
+        // the icon color and tooltip — no popup, no queue when the user is
+        // away. Per-state cooldown prevents the same alert from re-firing.
+        if (health !== this._lastHealth
+            && this.notifyOnCritical
+            && ESCALATE.has(health)
+            && this._cooldownOk(health)) {
+            this._markNotified(health);
+            this._notifyHealth(health, status);
         }
         this._lastHealth = health;
     }
@@ -228,14 +243,6 @@ class FanNodeApplet extends Applet.TextIconApplet {
         } catch (e) {
             Util.spawnCommandLine(
                 `notify-send -u critical -i dialog-error "${title}" "${body}"`);
-        }
-    }
-
-    _infoNotify(title, body) {
-        try {
-            Main.notify(title, body);
-        } catch (e) {
-            Util.spawnCommandLine(`notify-send -u low "${title}" "${body}"`);
         }
     }
 

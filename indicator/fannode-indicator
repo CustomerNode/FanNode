@@ -34,6 +34,12 @@ STATUS_FILE = os.environ.get("FANNODE_STATUS", "/run/fannode/status.json")
 ICON_DIR = "/usr/share/fannode/icons"
 STALE_AFTER_SECONDS = 30
 REFRESH_SECONDS = 2
+NOTIFY_COOLDOWN_SECONDS = 10 * 60  # don't re-fire the same alert for 10 min
+
+# Only these health states warrant a desktop popup. Others (bios_reclaim,
+# sustained_hot) are conveyed by the icon color and menu, so they don't
+# accumulate when the user is away.
+ESCALATE = {"thermal_overrun", "sensor_error"}
 
 
 def icon_for(state: str) -> str:
@@ -112,8 +118,15 @@ class FanNodeIndicator:
         self.indicator.set_title("FanNode")
 
         self._last_health = None
+        self._notified_at: dict[str, float] = {}
         self._build_menu()
         self.refresh()
+
+    def _cooldown_ok(self, key: str) -> bool:
+        return (time.time() - self._notified_at.get(key, 0.0)) >= NOTIFY_COOLDOWN_SECONDS
+
+    def _mark_notified(self, key: str) -> None:
+        self._notified_at[key] = time.time()
 
     def _build_menu(self):
         menu = Gtk.Menu()
@@ -192,7 +205,8 @@ class FanNodeIndicator:
         self.fan_item.set_label("")
         self.health_item.set_label(tip)
 
-        if self._last_health != "inactive":
+        if self._last_health != "inactive" and self._cooldown_ok("inactive"):
+            self._mark_notified("inactive")
             self._notify_critical("FanNode stopped",
                                   "Fan control has reverted to the BIOS.")
         self._last_health = "inactive"
@@ -217,11 +231,13 @@ class FanNodeIndicator:
         self.fan_item.set_label(f"Fan: {rpm} RPM ({pwm_pct}% PWM, {zone})")
         self.health_item.set_label(f"Health: {health}")
 
-        if health != self._last_health:
-            if health != "ok":
-                self._notify_health(health, status)
-            elif self._last_health and self._last_health not in ("ok", "inactive"):
-                self._notify_info("FanNode", "Temperatures back to normal.")
+        # Only popup states that need attention; others are visible via icon.
+        # Per-state cooldown prevents the same alert from re-firing.
+        if (health != self._last_health
+                and health in ESCALATE
+                and self._cooldown_ok(health)):
+            self._mark_notified(health)
+            self._notify_health(health, status)
         self._last_health = health
 
     def _notify_health(self, health: str, status: dict):
@@ -254,14 +270,6 @@ class FanNodeIndicator:
         except Exception:
             subprocess.Popen(["notify-send", "-u", "critical",
                               "-i", "dialog-error", summary, body])
-
-    def _notify_info(self, summary: str, body: str):
-        try:
-            n = Notify.Notification.new(summary, body, "dialog-information")
-            n.set_urgency(Notify.Urgency.LOW)
-            n.show()
-        except Exception:
-            subprocess.Popen(["notify-send", "-u", "low", summary, body])
 
 
 def main() -> int:

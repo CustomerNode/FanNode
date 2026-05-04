@@ -26,14 +26,8 @@
   "notify-on-critical": {
     "type": "switch",
     "default": true,
-    "description": "Show critical-notify popups on health errors",
-    "tooltip": "Pops a desktop alert when cooling cannot keep up, the BIOS is fighting FanNode, or the daemon stops."
-  },
-  "notify-on-recovery": {
-    "type": "switch",
-    "default": true,
-    "description": "Notify when temperatures return to normal",
-    "tooltip": "After a critical event, show a passive notification once temps recover."
+    "description": "Show desktop popups for critical states",
+    "tooltip": "Pops only for thermal_overrun, sensor_error, and daemon-stopped — the things that actually need your attention. Each state has a 10-minute cooldown to prevent spam. Less-severe states (BIOS reclaim, sustained heat) are conveyed by the icon color only."
   },
 
   "header-advanced": {
