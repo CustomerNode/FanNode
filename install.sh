@@ -144,18 +144,38 @@ install_indicator() {
     install_indicator_deps
     install_indicator_icons
     install -m 0755 "$SRC/indicator/fannode-indicator" "$BIN_DIR/fannode-indicator"
+
+    # The AppIndicator and the Cinnamon applet show the same data. If we're
+    # on Cinnamon, install_applet() will handle the panel UI — autostarting
+    # the AppIndicator too leaves the user with two fan icons. Skip the
+    # autostart on Cinnamon, and clean up an old one if upgrading.
     if [[ -f "$SRC/indicator/fannode-indicator.desktop" ]]; then
-        install -m 0644 "$SRC/indicator/fannode-indicator.desktop" \
-            "$AUTOSTART_DIR/fannode-indicator.desktop"
-        ok "AppIndicator installed (autostarts on next login)"
+        if _is_cinnamon; then
+            if [[ -f "$AUTOSTART_DIR/fannode-indicator.desktop" ]]; then
+                rm -f "$AUTOSTART_DIR/fannode-indicator.desktop"
+                ok "Removed AppIndicator autostart (Cinnamon applet supersedes it)"
+            else
+                ok "AppIndicator binary installed (autostart skipped — Cinnamon applet supersedes it)"
+            fi
+            ok "Run manually with: fannode-indicator &  (if you want it anyway)"
+        else
+            install -m 0644 "$SRC/indicator/fannode-indicator.desktop" \
+                "$AUTOSTART_DIR/fannode-indicator.desktop"
+            ok "AppIndicator installed (autostarts on next login)"
+        fi
     fi
+}
+
+_is_cinnamon() {
+    pgrep -x cinnamon >/dev/null 2>&1 \
+        || [[ "${XDG_CURRENT_DESKTOP:-}" == *"Cinnamon"* ]]
 }
 
 install_applet() {
     if [[ ! -d "$SRC/applet/$APPLET_UUID" ]]; then
         return 0
     fi
-    if pgrep -x cinnamon >/dev/null 2>&1 || [[ "${XDG_CURRENT_DESKTOP:-}" == *"Cinnamon"* ]]; then
+    if _is_cinnamon; then
         bold "Cinnamon detected — installing applet…"
         install -m 0755 -d "$CINNAMON_APPLET_DIR/icons"
         cp -r "$SRC/applet/$APPLET_UUID/." "$CINNAMON_APPLET_DIR/"
